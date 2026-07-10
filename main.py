@@ -2,28 +2,23 @@ import os
 from fastapi import FastAPI, Depends, HTTPException, status
 from pydantic import BaseModel
 from sqlalchemy.orm import Session
-from typing import List
 from dotenv import load_dotenv
 
-# LangChain building blocks (Cari ayın mövzusu)
 from langchain_google_genai import ChatGoogleGenerativeAI
 from langchain_core.prompts import ChatPromptTemplate
 from langchain_core.output_parsers import StrOutputParser
 
 import database
 
-# .env faylındakı dəyişənləri oxuyuruq
 load_dotenv()
 
-app = FastAPI(
-    title="VibeClone AI - Səsli Marketinq Asistenti API",
-    description="Səs yazılarından şəxsi üslubda LinkedIn kontenti yaradan agent tətbiqi.",
-    version="2026.1.0"
-)
+app = FastAPI(title="VibeClone AI Engine", version="2026.2.0")
+
 
 @app.on_event("startup")
 def on_startup():
     database.init_db()
+
 
 def get_db():
     db = database.SessionLocal()
@@ -32,81 +27,88 @@ def get_db():
     finally:
         db.close()
 
-# --- LANGCHAIN LCEL ZƏNCİRİNİN QURULMASI ---
 
-# 1. Müasir Gemini modelinin çağırılması (2026 standartı)
-model = ChatGoogleGenerativeAI(model="gemini-2.5-flash", temperature=0.7)
+# --- LANGCHAIN LCEL ZƏNCİRİ ---
+model = ChatGoogleGenerativeAI(model="gemini-1.5-flash", temperature=0.7)
 
-# 2. Advanced Prompt Engineering (LinkedIn-də vizual fərq yaradacaq marketinq strukturu)
+# Prompt artıq dinamikdir: həm səsi, həm də istifadəçinin stilini qəbul edir
 prompt_template = ChatPromptTemplate.from_messages([
     ("system", (
-        "Sən professional bir LinkedIn Growth Hacker və Creative Copywriter-sən. "
-        "Sənə istifadəçinin təbii və xaotik səs yazısının təmizlənmiş mətni veriləcək. "
-        "Sənin vəzifən bu mətndəki əsas ideyanı götürüb, oxuyanda LinkedIn-də 'Wow' effekti "
-        "yaradacaq, yüksək reaksiya (engagement) toplayacaq bir post hazırlamaqdır.\n\n"
-        "Qaydalar:\n"
-        "- Yazı dili tamamilə təbii, axıcı və peşəkar Azərbaycan dilində olmalıdır.\n"
-        "- Struktur mütləq cəlbedici bir başlıq (Hook) ilə başlamalı, abzaslar arası boşluqlar olmalıdır.\n"
-        "- Darıxdırıcı korporativ dildən uzaq dur, insani duyğunu qoru.\n"
-        "- Sonda 2-3 ədəd trend sahə heşteqi əlavə et."
+        "Sən professional LinkedIn asistentisən. Sənin vəzifən istifadəçinin səs qeydini "
+        "onun real yazı üslubuna uyğunlaşdıraraq cəlbedici bir LinkedIn postuna çevirməkdir.\n\n"
+        "İstifadəçinin Şəxsi Yazı Üslubu (Keçmiş Postları):\n"
+        "{style_context}\n\n"
+        "Qaydalar: Yazı tam təbii olmalı və yuxarıdakı üsluba bənzəməlidir."
     )),
-    ("user", "Mənim səs yazımın mətni budur:\n\n{transcript}")
+    ("user", "Səs qeydimin mətni: {transcript}")
 ])
 
-# 3. LCEL Chain Konstruksiyası (Prompt -> Model -> Parser)
-# Kursun ən vacib cari ay mövzusu!
-copt_writer_chain = prompt_template | model | StrOutputParser()
+copywriter_chain = prompt_template | model | StrOutputParser()
 
 
 # --- PYDANTIC MODELLƏRİ ---
-class TranscriptInput(BaseModel):
+class RegisterUser(BaseModel):
+    telegram_id: str
+    linkedin_url: str
+    scraped_context: str  # n8n MCP-dən gələn xülasə
+
+
+class VoiceInput(BaseModel):
+    telegram_id: str
     raw_transcript: str
 
-class PostResponse(BaseModel):
-    id: int
-    clean_text: str
-    token_count: int
-    generated_post: str
 
-    class Config:
-        from_attributes = True
+# --- ENDPOINTLƏR ---
 
-# --- API ENDPOINT ---
+@app.post("/api/v1/register-style", status_code=status.HTTP_201_CREATED)
+def register_user_style(payload: RegisterUser, db: Session = Depends(get_db)):
+    """ n8n MCP LinkedIn-dən datanı çəkib bu endpointə vuracaq """
+    user = db.query(database.UserProfile).filter(database.UserProfile.telegram_id == payload.telegram_id).first()
 
-@app.post("/api/v1/process-voice", response_model=PostResponse, status_code=status.HTTP_201_CREATED)
-def process_voice_input(payload: TranscriptInput, db: Session = Depends(get_db)):
-    if not payload.raw_transcript.strip():
-        raise HTTPException(status_code=400, detail="Səs yazısının mətni boş ola bilməz!")
+    if user:
+        user.writing_style_context = payload.scraped_context
+    else:
+        user = database.UserProfile(
+            telegram_id=payload.telegram_id,
+            linkedin_url=payload.linkedin_url,
+            writing_style_context=payload.scraped_context
+        )
+        db.add(user)
 
-    # 1. Data Hazırlığı: Regex ilə təmizləmə (Dərs 13)
+    db.commit()
+    return {"message": "İstifadəçi stili uğurla yadda saxlanıldı!"}
+
+
+@app.post("/api/v1/generate-post")
+def process_voice_input(payload: VoiceInput, db: Session = Depends(get_db)):
+    """ Telegram-dan səs gələndə işə düşən əsas mühərrik """
+    # 1. İstifadəçini bazadan tapırıq
+    user = db.query(database.UserProfile).filter(database.UserProfile.telegram_id == payload.telegram_id).first()
+    if not user or not user.writing_style_context:
+        raise HTTPException(status_code=404, detail="Əvvəlcə LinkedIn hesabınızı bağlayın!")
+
+    # 2. Mətni təmizləyirik
     cleaned_text = database.clean_transcript(payload.raw_transcript)
-
-    # 2. tiktoken ilə token sayımı (Dərs 13)
     token_count = database.count_tokens(cleaned_text)
 
-    # 3. Real LangChain LCEL Zəncirinin işə salınması
+    # 3. LangChain ilə Generasiya (Stil + Yeni Səs)
     try:
-        ai_generated_post = copt_writer_chain.invoke({"transcript": cleaned_text})
+        ai_generated_post = copywriter_chain.invoke({
+            "style_context": user.writing_style_context,
+            "transcript": cleaned_text
+        })
     except Exception as e:
-        raise HTTPException(status_code=502, detail=f"Gemini API ilə rabitə xətası: {str(e)}")
+        raise HTTPException(status_code=502, detail=f"AI Xətası: {str(e)}")
 
-    # 4. Məlumatın verilənlər bazasına yazılması (Dərs 12)
+    # 4. Tarixçəni yazırıq
     db_entry = database.VibePost(
+        user_id=user.telegram_id,
         raw_transcript=payload.raw_transcript,
         clean_text=cleaned_text,
         token_count=token_count,
         generated_post=ai_generated_post
     )
+    db.add(db_entry)
+    db.commit()
 
-    try:
-        db.add(db_entry)
-        db.commit()
-        db.refresh(db_entry)
-        return db_entry
-    except Exception as e:
-        db.rollback()
-        raise HTTPException(status_code=500, detail=f"Baza transaction xətası: {str(e)}")
-
-@app.get("/api/v1/history", response_model=List[PostResponse])
-def get_history(db: Session = Depends(get_db)):
-    return db.query(database.VibePost).all()
+    return {"generated_post": ai_generated_post, "tokens_used": token_count}

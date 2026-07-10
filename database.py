@@ -1,54 +1,47 @@
-print("FAYL TAMAMİLƏ UĞURLA İCRA OLUNUR!")
-
 import re
 import tiktoken
-from sqlalchemy import create_engine, Column, Integer, Text
-from sqlalchemy.orm import declarative_base, sessionmaker
+from sqlalchemy import create_engine, Column, Integer, String, Text, ForeignKey
+from sqlalchemy.orm import declarative_base, sessionmaker, relationship
 
-# Windows mühitində bloklanmamaq üçün SQLite istifadə edirik.
-# MacBook-da PostgreSQL-ə keçəndə sadəcə bu linki yeniləyəcəksən.
 DATABASE_URL = "sqlite:///./vibeclone.db"
 
 engine = create_engine(DATABASE_URL, connect_args={"check_same_thread": False})
 SessionLocal = sessionmaker(autocommit=False, autoflush=False, bind=engine)
 Base = declarative_base()
 
-# --- SQLALCHEMY MODELİ (Məlumat Strukturu) ---
+# 1. İSTİFADƏÇİ PROFİLİ (n8n MCP-dən gələn real LinkedIn datası bura yazılacaq)
+class UserProfile(Base):
+    __tablename__ = "user_profiles"
+
+    telegram_id = Column(String(100), primary_key=True, index=True)
+    linkedin_url = Column(String(200), nullable=False)
+    writing_style_context = Column(Text, nullable=True) # MCP-nin çəkdiyi real postlar bura düşəcək
+
+    # Əlaqə: Bir istifadəçinin çoxlu postu ola bilər
+    posts = relationship("VibePost", back_populates="owner")
+
+# 2. YARADILAN POSTLAR CƏDVƏLİ
 class VibePost(Base):
     __tablename__ = "vibe_posts"
 
-    id: int = Column(Integer, primary_key=True, index=True)
-    raw_transcript: str = Column(Text, nullable=False)   # Telegram-dan gələn xam səs mətni
-    clean_text: str = Column(Text, nullable=True)        # Regex ilə təmizlənmiş mətn
-    token_count: int = Column(Integer, nullable=True)     # tiktoken tərəfindən sayılan tokenlər
-    generated_post: str = Column(Text, nullable=True)    # Gemini-nin çıxardığı son LinkedIn postu
+    id = Column(Integer, primary_key=True, index=True)
+    user_id = Column(String(100), ForeignKey("user_profiles.telegram_id"), nullable=False)
+    raw_transcript = Column(Text, nullable=False)
+    clean_text = Column(Text, nullable=True)
+    token_count = Column(Integer, nullable=True)
+    generated_post = Column(Text, nullable=True)
 
-# --- DATA EMALI NÜVƏSİ (Cari Ayın Mövzuları) ---
+    owner = relationship("UserProfile", back_populates="posts")
 
+# --- DATA EMALI ---
 def clean_transcript(text: str) -> str:
-    """ Mətndəki HTML teqlərini və parazit danışıq sözlərini Regex ilə təmizləyir. """
-    text = re.sub(r"<[^>]+>", "", text)  # HTML teqlərini təmizlə
-    # Azərbaycan dilindəki tipik parazit sözləri təmizləyirik
+    text = re.sub(r"<[^>]+>", "", text)
     text = re.sub(r"\b(ııı|şey|yəni|eee|baxın)\b", "", text, flags=re.IGNORECASE)
     return re.sub(r"\s+", " ", text).strip()
 
 def count_tokens(text: str) -> int:
-    """ tiktoken istifadə edərək mətndəki dəqiq token sayını hesablayır. """
-    encoding = tiktoken.get_encoding("cl100k_base")  # Müasir LLM-lərin standart tokenizer mühərriki
+    encoding = tiktoken.get_encoding("cl100k_base")
     return len(encoding.encode(text))
 
-# Bazanı və cədvəlləri lokal olaraq yaratmaq üçün funksiya
 def init_db() -> None:
     Base.metadata.create_all(bind=engine)
-
-
-    if __name__ == "__main__":
-        print("Infrastruktur qurulur: SQLite bazası və cədvəllər yaradılır...")
-        init_db()
-        print("Uğurlu! 'vibeclone.db' faylı layihə qovluğunda yaradıldı.")
-
-        # Kiçik bir Regex və tiktoken testi (Sanity Check)
-        test_text = "ııı Salam, bu bir <p>marketinq</p> şey postudur yəni."
-        clean = clean_transcript(test_text)
-        tokens = count_tokens(clean)
-        print(f"Test Mətn: {clean} | Token Sayı: {tokens}")

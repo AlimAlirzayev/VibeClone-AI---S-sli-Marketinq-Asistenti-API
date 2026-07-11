@@ -30,7 +30,6 @@ def get_db():
 
 # --- LANGCHAIN LCEL ZƏNCİRİ ---
 model = ChatGoogleGenerativeAI(model="gemini-1.5-flash", temperature=0.7)
-
 # Prompt artıq dinamikdir: həm səsi, həm də istifadəçinin stilini qəbul edir
 prompt_template = ChatPromptTemplate.from_messages([
     ("system", (
